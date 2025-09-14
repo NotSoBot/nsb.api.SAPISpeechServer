@@ -1,4 +1,4 @@
-﻿using System.Net.Mime;
+using System.Net.Mime;
 using System.Runtime.InteropServices;
 using System.Text;
 using Interop.SpeechLib;
@@ -116,55 +116,60 @@ public class SpeechApiController : ControllerBase
         string? lang = null,
         VoiceGender? gender = null)
     {
-        var voice = new SpVoice();
-        SpMemoryStream memoryStream = new SpMemoryStreamClass();
-
-        memoryStream.Format.Type = SpeechAudioFormatType.SAFT48kHz16BitMono;
-
-        // Find the voice
-        var requiredAttributes = new List<string>();
-        if (vendor != null) requiredAttributes.Add($"Vendor={vendor}");
-        if (name != null) requiredAttributes.Add($"Name={name}");
-        if (lang != null)
-            try
-            {
-                var lcid = GetLanguageId(lang);
-                requiredAttributes.Add($"Language={lcid}");
-            }
-            catch (ArgumentException)
-            {
-                return BadRequest("Invalid language code");
-            }
-
-        switch (gender)
-        {
-            case VoiceGender.Female:
-                requiredAttributes.Add("Gender=Female");
-                break;
-            case VoiceGender.Male:
-                requiredAttributes.Add("Gender=Male");
-                break;
-        }
-
-        if (requiredAttributes.Count > 0)
-        {
-            var attributes = string.Join(";", requiredAttributes);
-
-            var voices = voice.GetVoices(attributes, string.Empty);
-            if (voices.Count == 0)
-                return NotFound();
-
-            voice.Voice = voices.Item(0);
-        }
-
-        // Speak it as WAV to memory
-        voice.AudioOutputStream = memoryStream;
+        SpVoice? voice = null;
+        SpMemoryStream? memoryStream = null;
+        
         try
         {
-            // ReSharper disable once BitwiseOperatorOnEnumWithoutFlags
+            voice = new SpVoice();
+            memoryStream = new SpMemoryStreamClass();
+            memoryStream.Format.Type = SpeechAudioFormatType.SAFT48kHz16BitMono;
+            
+            // Find the voice
+            var requiredAttributes = new List<string>();
+            if (vendor != null) requiredAttributes.Add($"Vendor={vendor}");
+            if (name != null) requiredAttributes.Add($"Name={name}");
+            if (lang != null)
+                try
+                {
+                    var lcid = GetLanguageId(lang);
+                    requiredAttributes.Add($"Language={lcid}");
+                }
+                catch (ArgumentException)
+                {
+                    return BadRequest("Invalid language code");
+                }
+            
+            switch (gender)
+            {
+                case VoiceGender.Female:
+                    requiredAttributes.Add("Gender=Female");
+                    break;
+                case VoiceGender.Male:
+                    requiredAttributes.Add("Gender=Male");
+                    break;
+            }
+            
+            if (requiredAttributes.Count > 0)
+            {
+                var attributes = string.Join(";", requiredAttributes);
+                var voices = voice.GetVoices(attributes, string.Empty);
+                if (voices.Count == 0)
+                    return NotFound();
+                voice.Voice = voices.Item(0);
+            }
+            
+            // Speak it as WAV to memory
+            voice.AudioOutputStream = memoryStream;
+            
             voice.Speak(text,
                 SpeechVoiceSpeakFlags.SVSFlagsAsync | SpeechVoiceSpeakFlags.SVSFPurgeBeforeSpeak);
             voice.WaitUntilDone(3000);
+            
+            // Return the WAV
+            var audioData = (byte[])memoryStream.GetData();
+            var wavData = CreateWavData(audioData, memoryStream.Format.GetWaveFormatEx());
+            return File(wavData, "audio/wav");
         }
         catch (COMException e)
         {
@@ -173,14 +178,30 @@ public class SpeechApiController : ControllerBase
                 return BadRequest(error);
             throw;
         }
-
-        // Return the WAV
-        var audioData = (byte[])memoryStream.GetData();
-        var wavData = CreateWavData(audioData, memoryStream.Format.GetWaveFormatEx());
-
-        return File(wavData, "audio/wav");
+        finally
+        {
+            // Fire and forget disposal - don't block the response
+            if (voice != null || memoryStream != null)
+            {
+                Task.Run(() =>
+                {
+                    try
+                    {
+                        if (voice != null)
+                            Marshal.ReleaseComObject(voice);
+                    }
+                    catch { }
+                    
+                    try
+                    {
+                        if (memoryStream != null)
+                            Marshal.ReleaseComObject(memoryStream);
+                    }
+                    catch { }
+                });
+            }
+        }
     }
-
 
     private static byte[] CreateWavData(byte[] audioData, SpWaveFormatEx audioFormat)
     {
